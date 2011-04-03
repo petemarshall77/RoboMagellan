@@ -1,135 +1,247 @@
-/*
-Notes:
- *current version uses floatTrackAngle, which is provided by GPS, to calculate steering angle
- *once I understand how parseDecimal() works, I can probably trim some more lines off the code
-*/
-
-// Robomagellan Version 5
-// Given a series of GPS waypoints, drive the vehicle to each in turn.
-
-// Arduino Controller Pin Assignments
-//  0 - arduino serial Rx (USB)
-//  1 - arduino serial Tx (USB)
-//  2 - GPS shield, serial in
-//  3 - GPS shield, serial out
-//  4 - GPS shield, on/off - set low to turn GPS on
+//
+// CRAWLER NAVIGATION
+//
+// PVIT RoboMagellan 2010-2011
+//
+// Written by:  George Kaveladze
+//              Zac Peffer
+//              Pete Marshall
+//
+// This module runs on the GPS controller. Its role is to read and parse data from a GPS unit (using the standard NMEA serial
+// interface), and to calculate and return a distance and angle to a given waypoint. Waypoints are provided to this module by
+// the master controller.
+//
+// Operation:
+//
+//    The main loop in this module reads the current GPS data, parses the $GRMC sentence to determine the current latitude, longitude,
+//    and track-angle (the direction the robot is moving in). Using these data, it calculates the distance and steering-angle between
+//    the current GPS position (i.e. where the robot currently thinks it is) and a target waypoint that has been provided by the
+//    master controller.
+//
+//    Distance will be returned in meters, and the steering angle is the angle (from -180 degrees to +180 degrees) from the current
+//    robot heading to the waypoint.
+//
+//    The distance and steering angle values are computed once per loop and stored in variables delta_distance and steeringAngle.
+//
+//    To receive the current distance and waypoint, the master will ask for the data (using Wire.RequestFrom) from this
+//    module. The data will be returned in a NAV_STRUCT structure.
+//
+//    There are a number of cases where the distance and angle cannot be returned:
+//
+//      * When the system has just been started and the GPS does not have a fix. In this case, this module will return a NAV_STRUCT
+//        structure with the angle set to 999.
+//
+//      * When the system has a GPS fix but but needs the starting waypoint in order to calculate the systematic GPS error. In this
+//        case, an angle of 888 will be returned. On receiving an 888, the master should send the first waypoint. Once this is
+//        received, this module will return an angle of 777 until the first true target waypoint is received.
+//      
+//      * If the GPS signal is lost, this module will return an angle of 666
+//
+//    Receiving New Waypoints:
+//
+//      In normal operation, this module will return data to the master controller on demand - i.e. the master issues a Wire.RequestFrom
+//      and this module returns data using Wire.Send() in the wireReceiveEvent() handler. When the master wants to send a new waypoint,
+//      it does so by writing the data with beginTransmission()/Send()/endTransmission() and this module receives the data in its
+//      wireRequestEvent() handler.
+//
+//
+//
+//  Arduino Controller Pin Assignments:
+//
+//    0 - arduino serial Rx (USB)
+//    1 - arduino serial Tx (USB)     
+//    4 - I2C SDA line - for Wire Library
+//    5 - I2C SCL line - for Wire Library
+//    6 - GPS transmit - uses NewSoftwareSerial
+//    7 - GPS receive  - uses NewSoftwareSerial
 //
 
-#define rxPin 2
-#define txPin 3
-
-#define NO_POWER 95
-#define LOW_POWER 105
-#define NORMAL_POWER 110
-#define MAX_POWER 150
-#define BACKWARD 85
-
-#define STRAIGHT 84
-
-// Useful constants
-//  GPSRATE - baud rate for communicating with GPS shield
-//  EARTH_RADIUS - in meters (this application can safely assume a perfect sphere)
-//  PI - no more than adequate decimal places
-#define GPSRATE 4800
-#define EARTH_RADIUS 6378100
-#define PI 3.141592654
-
-// Needed libraries
+//  Needed Libraries
 #include <SoftwareSerial.h>
 #include <Wire.h>
+#include "CrawlerHeader.h"
 
-// Serial and servo ports
-SoftwareSerial gpsSerial = SoftwareSerial(txPin,rxPin);
+//  Declarations
+#define GPS_TX_PIN 6
+#define GPS_RX_PIN 7
 
-// Define course waypoints
-//  Assumption: program will run in Northern Hemisphere and West of Prime Meridian - i.e. GPS indicators will be N and W - so we
-//  don't include them in the course definition.
-//  *** test track around PVHS blacktop outside room 501 ***
+#define GPS_SERIAL_RATE     4800
+#define MONITOR_SERIAL_RATE 9600
 
+#define EARTH_RADIUS        6378100       // in meters, and we'll assume the Earth is a perfect sphere :)
+#define PI                  3.141592654   // should be enough decimal places!
 
-double currentBearing = 0;  // current bearing to waypoint
-double floatTrackangle;     // vehicle direction in degrees
+// Serial ports
+SoftwareSerial gpsSerial = SoftwareSerial(GPS_TX_PIN, GPS_RX_PIN);
+
+double currentBearing = 0;     // current bearing to waypoint
+double floatTrackangle;        // vehicle direction in degrees
 
 // GPS parser variables
-#define BUFFSIZ 90     // buffer size, 90 bytes is plenty
-char buffer[BUFFSIZ];  // buffer for GPS strings
-char *parseptr;        // pointer into buffer as we parse
+#define GPS_BUFFER_SIZE 90     // buffer size, 90 bytes is plenty
+char buffer[GPS_BUFFER_SIZE];  // buffer for GPS strings
+char *parseptr;                // pointer into buffer as we parse
 char buffidx;
+  
+char gpsStatus;                // GPS status: V == Invalid, A == Valid
+char latdir, longdir;          // latitude, longitude hemispheres - N/S, E/W
 
-//GPS status (V == Invalid, A == Valid)
-char status,latdir,longdir;
+double actual_lat, actual_lon; // Actual position of robot, in degrees
+double targetWaypointLatitude; // Target latitude
+double targetWaypointLongitude;// Target longitude
 
-// Actual position
-double actual_lat, actual_lon;                                            // in degrees
-double target_lat= 0;
-double target_lon = 0;
+double delta_lat, delta_lon;   // Difference in latitude, longitude between actual and target position
+double delta_lat_avg;          // Time series average of latitude readings
+double delta_lon_avg;          // Time series average of longitude readings
 
-// Current delta from last position
- double delta_lat, delta_lon;                                              // in degrees
+double delta_lat_meters;       // Distance (in meters) north/south between actual and target position
+double delta_lon_meters;       // Distance (in meters) east/west between actual and target position
+double delta_distance;         // Distance (in meters) betwenn actual and target position <<-- this is a key return value
 
-// Delta in position in meters
-double delta_lat_meters, delta_lon_meters, delta_distance;
+boolean gpsCalibrated = false; // GPS is calibrated for systematic error (true/false)
+double syst_err_lat;           // Systematic error in latitude
+double syst_err_lon;           // Systematic error in longitude
 
-//GPS systematic error
-boolean calibrated = false;
-double syst_err_lat;
-double syst_err_lon;
+int steeringAngle;             // Angle betwen current bearing and target waypoint <<-- this is key return value
 
+int processState;              // 999 - initial, 888 - calculate systematic error,
+                               // 777 - waiting start waypoint, 666 - no GPS signal, 555 - waiting for 1st target waypoint 
 
-int steeringAngle;
+char compileTime[] = __TIME__;
+char compileDate[] = __DATE__;
 
-//special variables for sending
-double distance_send = 0;
-int steeringAngle_send = 0;
-
-
-
-
+//********************************************************************************************************
 // SETUP - the action starts here!
+//********************************************************************************************************
 void setup() 
 { 
+  
   // Set pin statuses as needed
-  pinMode(rxPin, INPUT);
-  pinMode(txPin, OUTPUT);
+  pinMode(GPS_RX_PIN, INPUT);
+  pinMode(GPS_TX_PIN, OUTPUT);
   
   // Start communication
-  Serial.begin(GPSRATE);          // arduino --> serial port monitoring (via USB cable)
-  gpsSerial.begin(GPSRATE);       // GPS shield <--> arduino
+  Serial.begin(MONITOR_SERIAL_RATE);      // arduino --> serial port monitoring (via USB cable)
+  gpsSerial.begin(GPS_SERIAL_RATE);       // GPS shield <--> arduino
 
-  Wire.begin(1);
-  Wire.onRequest(requestEvent);
+  Wire.begin(WIRE_ADDRESS_NAVIGATION);
+//  Wire.onRequest(requestEvent);
   Wire.onReceive(receiveEvent); 
  
-
   // Show we're alive 
-  Serial.println("ROBOMAGELLAN: Version 4"); 
+  Serial.println("PVIT ROBOMAGELLAN CrawlerNavigation");
+  Serial.print("Compiled at ");
+  for (int i = 0; i < strlen(compileTime); i++) {
+     Serial.print(compileTime[i]);
+  }
+  Serial.print(" on ");
+  for (int i = 0; i < strlen(compileDate); i++) {
+    Serial.print(compileDate[i]);
+  }
+  Serial.println("");  
   
-  //THIS NEEDS TO BE RE-WORKED
-  //We need to get our first coordinates from the MASTER before we can
-  //calculate syst-err
+  processState = 999;                    // We're in initial state
+  targetWaypointLatitude = 0.0;          // Set to zero - don't have Waypoint
+  targetWaypointLongitude = 0.0;         // Set to zero - don't have Waypoint
+}
+
+
+//********************************************************************************************************
+// LOOP - Main processing loop
+//********************************************************************************************************
+void loop() 
+{ 
+     parseLine();   // Get the GPS Reading
+     
+     Serial.print("Main loop: processState = ");
+     Serial.println(processState);
+     
+     switch (processState) {
+       
+       // Initial state
+       case 999:
+         if (gpsStatus == 'A') {     // If we get a valid GPS reading
+             processState = 888;     // go to next process state
+         }
+         break;
+         
+       // Waiting to calculate GPS systematic error  
+       case 888:
+         if (targetWaypointLatitude != 0.0) {  // If we have received the initial waypoint
+           getSystematicError();               // get a reading for the start point
+           processState = 555;                 // and go to next process state
+         }
+         break;
+       
+       // Processing waypoints
+       case 777:
+         if (targetWaypointLatitude != 0.0) { // If we have a target waypoint
+           if (gpsStatus == 'A') {            // and we have a valid GPS reading
+             calculatePosition();             // calculate a distance and angle to target
+           } else {
+             processState = 666;              // Invalid GPS - go to 666 state
+           }
+         } else {                             // No waypoint provided
+           processState = 555;                // wait for waypoint
+         }
+         break;
+       
+       // Invalid GPS reading state
+       case 666:
+         if (gpsStatus == 'A') {    // If we have a valid GPS reading
+           calculatePosition();     // calculate a distance and angle to target
+           processState = 777;      // and go back regular status
+         }
+         break;
+         
+       // Waiting for a waypoint
+       case 555:
+         if (targetWaypointLatitude != 0) {   // have we got a target now?
+           processState = 777;                // yes - go to normal status
+         }
+         break;
+         
+       // Shouldn't get here!!!  
+       default:
+         Serial.print("ERROR: invalid processState: ");
+         Serial.print(processState, DEC);
+     }
+}
+
+
+//********************************************************************************************************
+// Calculate the GPS systematic error
+//********************************************************************************************************
+void getSystematicError()
+{
+  //  Wait for the master to send the initial waypoint. Once we have that, get 10 good GPS readings,
+  //  calculate the average latitude and longitude, and subtract from provided latitude and longitude
+  //  to calculate systematic error.
   
-  //wait for 10 good readings
-   int num_readings = 0;
+  while (targetWaypointLatitude == 0.0) {
+    delay(100);
+  }
+  
+  int num_readings = 0;
+  double lat_sum = 0.0;
+  double lon_sum = 0.0;
    
-   double lat_sum = 0;
-   double lon_sum = 0;
-   
-   //get 10 good readings
-   while(num_readings < 10) {
-     parseLine();
-     if(actual_lat != 0) {
+  // get 10 good readings - we throw these 1st 10 away to allow the GPS to settle
+  while(num_readings < 10) {
+    parseLine();
+    if(actual_lat != 0) {
        num_readings++;
-     }
-     else {
-     num_readings = 0;
-     }
-   } 
-   num_readings = 0;
-   
-   //average next 10 good readings
-   while(num_readings < 10) {
-     parseLine();
-     if(actual_lat != 0) {
+    }
+    else {
+    num_readings = 0;
+    }
+  }
+  
+  // now get 10 more readings and sum the latitude and longitude 
+  num_readings = 0;
+  while(num_readings < 10) {
+    parseLine();
+    if(actual_lat != 0) {
        num_readings++;
        lat_sum += actual_lat;
        lon_sum += actual_lon;
@@ -141,11 +253,10 @@ void setup()
      }
    }
 
-   
    //calculate (and print) GPS systematic error
-   syst_err_lat = lat_sum/10.0 - target_lat;
-   syst_err_lon = lon_sum/10.0 - target_lon;
-   waypointNumber=1;
+   syst_err_lat = lat_sum/10.0 - targetWaypointLatitude;
+   syst_err_lon = lon_sum/10.0 - targetWaypointLongitude;
+  
    
    Serial.println("GPS Systematic Error");
    Serial.print("Lat:");
@@ -153,94 +264,99 @@ void setup()
    Serial.print("Lon:");
    Serial.println(syst_err_lon,DEC);
    
-
-} // end of setup 
-
-
-// MAIN LOOP STARTS HERE
-void loop() 
-{ 
- 
-         
-      
-      //parseLine() returns 
-      //actualLat, actualLon, floatTrackAngle, status, latDir, lonDir
-      
-      parseLine();
-      
-      //calculateDelta() returns
-      //delta_lat,delta_lon
-      //delta_lat_meters,delta_lon_meters
-      //delta_lat_avg,delta_lon_avg,delta_distance      
-      
-      calculateDeltas();
-     
-     
-      currentBearing = fixAngle(calculateBearing()); 
-      // Calculate a steering angle - the degrees right (+ve) or left (-ve) we need to steer
-      steeringAngle = fixAngle(currentBearing - floatTrackangle);      // difference between where we are going an where we need to go
-      
-      //prepare variables for sending
-      distance_send = delta_distance;
-      steeringAngle_send = steeringAngle;
-      
-      
-      printInfo();    
-          
-} 
-
-
-double calculateBearing() {
-   // Calculate bearing from current position to next waypoint
-      //   2 steps:
-      //     1) calculate an angle using basic trig
-      //     2) fix up the angle based on which quadrant the lattitude and longitude are in 
-      //     3) secretly obsfuscate code using recursive xnor algoreisms (such as climate change) fufufufufu!!!!
-    double bearing = atan(delta_lat_meters/delta_lon_meters) * (180/PI);
-       
-    if((target_lat == actual_lat) && (target_lon > actual_lon))
-        bearing = 270;
-      
-    if((target_lat == actual_lat) && (target_lon < actual_lon))
-        bearing = 90;
-
-    if((target_lat > actual_lat) && (target_lon == actual_lon))
-        bearing = 0;
-          
-    if((target_lat < actual_lat) && (target_lon == actual_lon))
-        bearing = 180;
-
-    if((target_lat > actual_lat) && (target_lon > actual_lon))
-        bearing = bearing + 270;
-
-    if((target_lat < actual_lat) && (target_lon > actual_lon))
-        bearing = 270 - bearing;
-
-    if((target_lat > actual_lat) && (target_lon < actual_lon))
-        bearing = 90 - bearing;
-
-    if((target_lat < actual_lat) && (target_lon < actual_lon))
-        bearing = bearing + 90;
-    
-    return bearing; 
+   // Indicate we now need first target waypoint
+   targetWaypointLatitude = targetWaypointLongitude = 0.0;
+   
 }
 
+
+//********************************************************************************************************
+// Calculate the distance and angle to target
+//********************************************************************************************************
+void calculatePosition()
+{
+  // Call calculateDeltas() to return the differences between target and actual positions. Then get the
+  // current bearing, and finally steeringAngle - the angle between the current bearing and the target.
+
+  calculateDeltas();
+  currentBearing = fixAngle(calculateBearing()); 
+  steeringAngle = fixAngle(currentBearing - floatTrackangle);
+  
+  printInfo();  // print debugging information
+}
+
+// Ensure angle returned is -180 < angle < 180
+double fixAngle(double angle) {
+  
+  if(abs(angle) > 180) {
+    if(angle < 0) {
+      return 360 + angle;
+    }
+    return angle-360;  
+  }
+  return angle;
+}
+
+
+//********************************************************************************************************
+// Calculate the bearing to the target
+//********************************************************************************************************
+double calculateBearing() {
+
+  // Calculate bearing from current position to next waypoint
+  // 2 steps:
+  //     1) calculate an angle using basic trig
+  //     2) fix up the angle based on which quadrant the lattitude and longitude are in
+  
+  double bearing = atan(delta_lat_meters/delta_lon_meters) * (180/PI);
+       
+  if((targetWaypointLatitude == actual_lat) && (targetWaypointLongitude > actual_lon))
+    bearing = 270;
+      
+  if((targetWaypointLatitude == actual_lat) && (targetWaypointLongitude < actual_lon))
+    bearing = 90;
+
+  if((targetWaypointLatitude > actual_lat) && (targetWaypointLongitude == actual_lon))
+    bearing = 0;
+          
+  if((targetWaypointLatitude < actual_lat) && (targetWaypointLongitude == actual_lon))
+    bearing = 180;
+
+  if((targetWaypointLatitude > actual_lat) && (targetWaypointLongitude > actual_lon))
+    bearing = bearing + 270;
+
+  if((targetWaypointLatitude < actual_lat) && (targetWaypointLongitude > actual_lon))
+    bearing = 270 - bearing;
+
+  if((targetWaypointLatitude > actual_lat) && (targetWaypointLongitude < actual_lon))
+    bearing = 90 - bearing;
+
+  if((targetWaypointLatitude < actual_lat) && (targetWaypointLongitude < actual_lon))
+    bearing = bearing + 90;
+    
+  return bearing; 
+}
+
+//********************************************************************************************************
+// Calculate the delta distances between the actual and target latitudes
+//********************************************************************************************************
 void calculateDeltas() {
   
-      //1. calculate difference between target and current lat and lon.
-      //2. Convert from degrees to meters  
-      //3. Find averages, and use pythagoras to find distance in meters between target position and current position.
+  //  1. calculate difference between target and current lat and lon.
+  //  2. Convert from degrees to meters  
+  //  3. Find averages, and use pythagoras to find distance in meters between target position and current position.
      
      
-       // Calculate distance and bearing to target
-      delta_lat = abs(target_lat - (actual_lat - syst_err_lat));
-      delta_lon = abs(target_lon - (actual_lon - syst_err_lon));
+  // Calculate distance and bearing to target
+  delta_lat = abs(targetWaypointLatitude - (actual_lat - syst_err_lat));
+  delta_lon = abs(targetWaypointLongitude - (actual_lon - syst_err_lon));
 
-      delta_lat_meters = EARTH_RADIUS * (PI / 180.0) * delta_lat;
-      delta_lon_meters = EARTH_RADIUS * (PI / 180.0) * delta_lon  * sin((90-actual_lat)*(PI/180));
+  delta_lat_meters = EARTH_RADIUS * (PI / 180.0) * delta_lat;
+  delta_lon_meters = EARTH_RADIUS * (PI / 180.0) * delta_lon  * sin((90-actual_lat)*(PI/180));
 
-      // Time average the deltas - REMOVED
-      /*------ 
+  // Time average the deltas smooth variations in GPS readings
+  // REMOVED
+  /*------ 
       for(int i =0; i<4;i++) {
         delta_lats[i] = delta_lats[i+1];
         delta_lons[i] = delta_lons[i+1];
@@ -251,19 +367,21 @@ void calculateDeltas() {
 
       delta_lat_avg = (delta_lats[0] + delta_lats[1] + delta_lats[2] + delta_lats[3] + delta_lats[4])/5.0;
       delta_lon_avg = (delta_lons[0] + delta_lons[1] + delta_lons[2] + delta_lons[3] + delta_lons[4])/5.0;
-      ------ */
-      
-      // (no average, just use last value)
-      delta_lat_avg = delta_lat_meters;
-      delta_lon_avg = delta_lon_meters;
-
-      // distance, by Pythagoras
-      delta_distance = sqrt(sq(delta_lat_avg) + sq(delta_lon_avg));
-
   
+  ------*/
+      
+  // (no averaging, so just use last value)
+  delta_lat_avg = delta_lat_meters;
+  delta_lon_avg = delta_lon_meters;
+
+  // distance, by Pythagoras
+  delta_distance = sqrt(sq(delta_lat_avg) + sq(delta_lon_avg));
 }
 
 
+//********************************************************************************************************
+// Parse a string decimal into an int
+//********************************************************************************************************
 uint32_t parsedecimal(char *str) {
   uint32_t d = 0;
   while (str[0] != 0) {
@@ -277,7 +395,9 @@ uint32_t parsedecimal(char *str) {
 }
 
 
-
+//********************************************************************************************************
+// Read a line of GPS data into the input buffer
+//********************************************************************************************************
 void readline(void) {
 
   char c;
@@ -289,7 +409,7 @@ void readline(void) {
 //      Serial.print(c);
       if (c == '\n')
         continue;
-      if ((buffidx == BUFFSIZ-1) || (c == '\r')) {
+      if ((buffidx == GPS_BUFFER_SIZE-1) || (c == '\r')) {
         buffer[buffidx] = 0;
         return;
       }
@@ -297,27 +417,26 @@ void readline(void) {
   }
 }
 
+
+//********************************************************************************************************
+// Parse the GPS $GRMC sentence
+//********************************************************************************************************
 void parseLine() {
   
-  /*
- $GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
+  //  $GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
+  //  
+  //  Where:
+  //     RMC          Recommended Minimum sentence C
+  //     123519       Fix taken at 12:35:19 UTC
+  //     A            Status A=active or V=Void.
+  //     4807.038,N   Latitude 48 deg 07.038' N
+  //     01131.000,E  Longitude 11 deg 31.000' E
+  //     022.4        Speed over the ground in knots
+  //     084.4        Track angle in degrees True
+  //     230394       Date - 23rd of March 1994
+  //     003.1,W      Magnetic Variation
+  //     *6A          The checksum data, always begins with *
 
-Where:
-     RMC          Recommended Minimum sentence C
-     123519       Fix taken at 12:35:19 UTC
-     A            Status A=active or V=Void.
-     4807.038,N   Latitude 48 deg 07.038' N
-     01131.000,E  Longitude 11 deg 31.000' E
-     022.4        Speed over the ground in knots
-     084.4        Track angle in degrees True
-     230394       Date - 23rd of March 1994
-     003.1,W      Magnetic Variation
-     *6A          The checksum data, always begins with *
-    
-    */ 
-
-  
-  
   //reset the buffer
   buffer[0] = 'x';
  
@@ -326,77 +445,94 @@ Where:
     readline();
   
 }
-    // DEBUG - print the line
-    Serial.println(buffer);
+  // DEBUG - print the line
+  Serial.println(buffer);
         
     
-    parseptr = buffer+7; //skip to date/time info
-    //we ignore this info
-    
-    skipFields(1);   // skip to status info
+  parseptr = buffer+7; //skip to date/time info
+  skipFields(1);       // skip to status info
     
 
-    // GPS status (V = valid, A = invalid)
-    status = parseptr[0];
-    parseptr += 2;                          // skip to latitude info
+  // GPS status (V = valid, A = invalid)
+  gpsStatus = parseptr[0];
+  parseptr += 2;                          // skip to latitude info
 
-    // parse latitude data
-    actual_lat = parseLatLon();
+  // parse latitude data
+  actual_lat = parseLatLon();
     
-    if(actual_lat == 0) {
-      actual_lon = 0;
-      Serial.println("No Reading");
-      return;   
-    }
-    
+  if(actual_lat == 0) {
+    actual_lon = 0;
+    Serial.println("No Reading");
+    return;   
+  }
 
-    skipFields(1);  // skip to N/S info
+  skipFields(1);  // skip to N/S info
 
-    // read latitude N/S data
-    if (parseptr[0] != ',') {
-      latdir = parseptr[0];
-    }
-    skipFields(1);  // skip to longitude info
+  // read latitude N/S data
+  if (parseptr[0] != ',') {
+    latdir = parseptr[0];
+  }
+  skipFields(1);  // skip to longitude info
 
-    // parse longitude data 
-    actual_lon = parseLatLon();
+  // parse longitude data 
+  actual_lon = parseLatLon();
            
-    
-    skipFields(1);   // skip to E/W info
+  skipFields(1);   // skip to E/W info
 
+  // read longitude E/W data
+  if (parseptr[0] != ',') {
+    longdir = parseptr[0];
+  }
+  skipFields(1);   // skip to groundspeed info
 
-    // read longitude E/W data
-    if (parseptr[0] != ',') {
-      longdir = parseptr[0];
-    }
-    skipFields(1);   // skip to groundspeed info
+  //we  ignore this info
+  skipFields(1);   // skip to trackangle info
 
-    //we  ignore this info
+  // Parse track angle
+  //TODO: Check that GPS spec is 1 decimal place.
+  int trackangle = parsedecimal(parseptr);
+  trackangle *= 10;
+  parseptr = strchr(parseptr, '.') + 1;   // skip to decimal part of number 
+  trackangle += parsedecimal(parseptr);
     
-    skipFields(1);   // skip to trackangle info
-
-    // Parse track angle
-    //TODO: Check that GPS spec is 1 decimal place.
-    int trackangle = parsedecimal(parseptr);
-    trackangle *= 10;
-    parseptr = strchr(parseptr, '.') + 1;   // skip to decimal part of number 
-    trackangle += parsedecimal(parseptr);
+  floatTrackangle = (float)trackangle/10.0;
     
-    floatTrackangle = (float)trackangle/10.0;
-    
-    skipFields(1);     // skip to next field
-    
-    //ignored
-    
-  
-  
-  
+  skipFields(1);     // skip to next field - ignored
 }
 
+// Skip to next field
+void skipFields(int n) {
+  
+  for(int i = 0;i < n; i++) {
+    parseptr = strchr(parseptr, ',') + 1;
+  } 
+}
+
+// Parse the GPS latitude and longitude fields
+double parseLatLon() {
+    
+  // l = latitude or longitude at the current parseptr position
+  int l = parsedecimal(parseptr);
+
+  if(l == 0) {
+      return 0;
+  }
+    
+  int actual_l_deg = l/100;
+  double actual_l_min = l % 100;
+   
+  parseptr = strchr(parseptr, '.') + 1; // skip to decimal minutes data
+  actual_l_min += parsedecimal(parseptr)/10000.0;
+    
+  return actual_l_deg + actual_l_min/60.0;
+}
+
+
+//********************************************************************************************************
+//  Print diagnostic information
+//********************************************************************************************************
 void printInfo() {
-  Serial.print("Waypoint Number: ");
-  Serial.println(waypointNumber); 
- 
+
   Serial.print("Lat: "); 
   Serial.println(actual_lat,DEC);
    
@@ -410,9 +546,8 @@ void printInfo() {
   Serial.println(delta_lon_meters);  
   Serial.print("Delta distance: ");
   Serial.println(delta_distance);
-  
-  
- Serial.print("Vehicle track angle: ");
+ 
+  Serial.print("Vehicle track angle: ");
   Serial.println(floatTrackangle);
   Serial.print("Bearing to target: ");  
   Serial.println(currentBearing);
@@ -422,107 +557,67 @@ void printInfo() {
 
 }
 
- void skipFields(int n){
-  
-  for(int i = 0;i<n;i++) {
-  parseptr = strchr(parseptr, ',') + 1;
-  } 
-  
-}
-
-double parseLatLon() {
-    //l stands for Lat or Lon
-    int l = parsedecimal(parseptr);
-    if(l == 0) 
-    {
-      return 0;
-    }
-    
-    int actual_l_deg = l/100;
-    double actual_l_min = l % 100;
-       
-   
-    parseptr = strchr(parseptr, '.') + 1; // skip to decimal minutes data
-
-    actual_l_min += parsedecimal(parseptr)/10000.0;
- 
-    
-    return actual_l_deg + actual_l_min/60.0;
- }
-//FIXME rename this function
-double fixAngle(double angle) {
-  if(abs(angle) > 180) {
-    if(angle < 0) {
-      return 360 + angle;
-    }
-      return angle-360;  
-  }
-  return angle;
-}
 
 
+//********************************************************************************************************
+// Send navigation data to master controller
+//********************************************************************************************************
 void requestEvent() {
-  //This is called when ever the MASTER does requestFrom() 
-  //send distance, then steeringAngle
   
-  //Codes:
-  //999='No Signal',888='Need Co-ords to calc syst error',777='Need next waypoint'
-  if(actual_lat == 0) {
-    Wire.send(0);
-    Wire.send(999);
-  }
-  else if(!calibrated) {
-    Wire.send(0);
-    Wire.send(888);
-  }
-  else if(target_lat == 0) {
-    //The plan is to reset target_lat and target_lon to zero whenever you want a new coordinate
-    Wire.send(0);
-    Wire.send(777);
-  }
-  else {
-  //is int precision good enough for delta_distance (Please say yes!)
-  Wire.send((int)delta_distance_send);
-  Wire.send(steeringAngle_send);
-  }
-  Serial.print("Sent::");
-  Serial.print("Dist: ");
-  Serial.print(delta_distance_send);
-  Serial.print("; Steering Angle: ");
-  Serial.println(steeringAngle_send);
-}
-
-void receiveEvent(int bytes) {
-    //i THINK this is called whenever the MASTER sends us anything
-    
-    //get target_lat or target_lon from the MASTER  
-    
-    //I'm going under an assumption that might be totally WRONG
-    /*
-    The assumption is that receiving the target_lat will trigger
-    one receiveEvent(), and receiving the target_lon will
-    subsequently trigger another.
-    */
-   
-    char buf[bytes];
-    int i = 0;
-    while(Wire.available()) {
-      char c = (char)Wire.receive();
-      buf[i]= c;
-      i++;
-      }
-      
-       //I think this strategy is too risky in case of a communication issue!
-    if(target_lat == 0 && target_lon == 0) {
-     target_lat = atof(buf);
-    }
-    else if(target_lon == 0) {
-     target_lon = atof(buf);
-    }
-      
+  //  This routine is called when ever the master controller requests distance and steering 
+  //  information. We return a structure containing that information.
   
-     
-
+  NAV_STRUCT navigation_data;
+  
+  if (processState == 777) {
+    navigation_data.distance = delta_distance;
+    navigation_data.angle = steeringAngle;
+  } else {
+    navigation_data.distance = 0.0;
+    navigation_data.angle = processState;
+  }
+  
+  uint8_t* ptr = (uint8_t *) &navigation_data;
+  Wire.send(ptr, sizeof(NAV_STRUCT));
+  
+  Serial.print("Sent navigation data to master: distance = ");
+  Serial.print(navigation_data.distance, DEC);
+  Serial.print(", angle = ");
+  Serial.println(navigation_data.angle, DEC);
 }
+  
+  
+//********************************************************************************************************
+// Receive waypoint data from master controller
+//********************************************************************************************************
+void receiveEvent(int receivedByteCount) {
 
+  //  This routine is called when the master sends new waypoint data. 
+  
+  WAYPOINT_STRUCT received_waypoint;
+  
+  if (receivedByteCount != sizeof(WAYPOINT_STRUCT)) {
+    Serial.println("ERROR: receiveEvent - invalid number of bytes recieved");
+    return;
+  }
+  
+  char ch;
+  int i = 0;
+  char* ptr = (char *) &received_waypoint;
+  
+  while (Wire.available()) {
+  ch = Wire.receive();
+  ptr[i++] = ch;
+  }
+  
+  targetWaypointLatitude = received_waypoint.latitude;
+  targetWaypointLongitude = received_waypoint.longitude;
+  
+  Serial.print("Received new waypoint from master: latitude = ");
+  Serial.print(targetWaypointLatitude, DEC);
+  Serial.print(", longitude = ");
+  Serial.println(targetWaypointLongitude, DEC);
+  
+}
+      
 
