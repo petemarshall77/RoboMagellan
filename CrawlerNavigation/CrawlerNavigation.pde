@@ -57,13 +57,13 @@
 //
 
 //  Needed Libraries
-#include <SoftwareSerial.h>
+#include <NewSoftSerial.h>
 #include <Wire.h>
 #include "CrawlerHeader.h"
 
 //  Declarations
-#define GPS_TX_PIN 6
-#define GPS_RX_PIN 7
+#define GPS_TX_PIN 3
+#define GPS_RX_PIN 2
 
 #define GPS_SERIAL_RATE     4800
 #define MONITOR_SERIAL_RATE 9600
@@ -72,7 +72,7 @@
 #define PI                  3.141592654   // should be enough decimal places!
 
 // Serial ports
-SoftwareSerial gpsSerial = SoftwareSerial(GPS_TX_PIN, GPS_RX_PIN);
+NewSoftSerial gpsSerial = NewSoftSerial(GPS_RX_PIN, GPS_TX_PIN);
 
 double currentBearing = 0;     // current bearing to waypoint
 double floatTrackangle;        // vehicle direction in degrees
@@ -125,7 +125,7 @@ void setup()
   gpsSerial.begin(GPS_SERIAL_RATE);       // GPS shield <--> arduino
 
   Wire.begin(WIRE_ADDRESS_NAVIGATION);
-//  Wire.onRequest(requestEvent);
+  Wire.onRequest(requestEvent);
   Wire.onReceive(receiveEvent); 
  
   // Show we're alive 
@@ -139,7 +139,7 @@ void setup()
     Serial.print(compileDate[i]);
   }
   Serial.println("");  
-  
+
   processState = 999;                    // We're in initial state
   targetWaypointLatitude = 0.0;          // Set to zero - don't have Waypoint
   targetWaypointLongitude = 0.0;         // Set to zero - don't have Waypoint
@@ -151,10 +151,10 @@ void setup()
 //********************************************************************************************************
 void loop() 
 { 
-     parseLine();   // Get the GPS Reading
-     
      Serial.print("Main loop: processState = ");
      Serial.println(processState);
+
+     parseLine();   // Get the GPS Reading
      
      switch (processState) {
        
@@ -406,7 +406,7 @@ void readline(void) {
       c=gpsSerial.read();
       if (c == -1)
         continue;
-//      Serial.print(c);
+//      Serial.print(c);   // debugging  
       if (c == '\n')
         continue;
       if ((buffidx == GPS_BUFFER_SIZE-1) || (c == '\r')) {
@@ -443,9 +443,9 @@ void parseLine() {
  // check if $GPRMC (global positioning fixed data)
   while (strncmp(buffer, "$GPRMC",6) != 0) {
     readline();
-  
 }
   // DEBUG - print the line
+  Serial.print("GPS: ");
   Serial.println(buffer);
         
     
@@ -534,24 +534,26 @@ double parseLatLon() {
 void printInfo() {
 
   Serial.print("Lat: "); 
-  Serial.println(actual_lat,DEC);
-   
+  Serial.print(actual_lat,DEC);
+  Serial.print("  ");
   Serial.print("Long: ");
   Serial.println(actual_lon,DEC); 
-   
 
   Serial.print("Delta Latitude in meters: ");
-  Serial.println(delta_lat_meters);
+  Serial.print(delta_lat_meters);
+  Serial.print("  ");
   Serial.print("Delta Longitude in meters: ");
-  Serial.println(delta_lon_meters);  
+  Serial.print(delta_lon_meters);
+  Serial.print("  ");  
   Serial.print("Delta distance: ");
   Serial.println(delta_distance);
  
   Serial.print("Vehicle track angle: ");
-  Serial.println(floatTrackangle);
+  Serial.print(floatTrackangle);
+  Serial.print("  ");
   Serial.print("Bearing to target: ");  
-  Serial.println(currentBearing);
-  
+  Serial.print(currentBearing);
+  Serial.print("  ");
   Serial.print("Steering Angle: ");
   Serial.println(steeringAngle);   
 
@@ -579,13 +581,8 @@ void requestEvent() {
   
   uint8_t* ptr = (uint8_t *) &navigation_data;
   Wire.send(ptr, sizeof(NAV_STRUCT));
-  
-  Serial.print("Sent navigation data to master: distance = ");
-  Serial.print(navigation_data.distance, DEC);
-  Serial.print(", angle = ");
-  Serial.println(navigation_data.angle, DEC);
-}
-  
+  }
+   
   
 //********************************************************************************************************
 // Receive waypoint data from master controller
@@ -595,19 +592,18 @@ void receiveEvent(int receivedByteCount) {
   //  This routine is called when the master sends new waypoint data. 
   
   WAYPOINT_STRUCT received_waypoint;
-  
+ 
   if (receivedByteCount != sizeof(WAYPOINT_STRUCT)) {
     Serial.println("ERROR: receiveEvent - invalid number of bytes recieved");
     return;
   }
   
+  uint8_t* ptr = (uint8_t *) &received_waypoint;
   char ch;
-  int i = 0;
-  char* ptr = (char *) &received_waypoint;
-  
+
   while (Wire.available()) {
-  ch = Wire.receive();
-  ptr[i++] = ch;
+    ch = Wire.receive();
+    *ptr++ = ch;
   }
   
   targetWaypointLatitude = received_waypoint.latitude;
