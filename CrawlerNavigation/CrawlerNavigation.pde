@@ -107,6 +107,8 @@ int steeringAngle;             // Angle betwen current bearing and target waypoi
 int processState;              // 999 - initial, 888 - calculate systematic error,
                                // 777 - waiting start waypoint, 666 - no GPS signal, 555 - waiting for 1st target waypoint 
 
+bool forceRestart = false;     // if set to true, will force a restart
+
 char compileTime[] = __TIME__;
 char compileDate[] = __DATE__;
 
@@ -151,61 +153,73 @@ void setup()
 //********************************************************************************************************
 void loop() 
 { 
-     Serial.print("Main loop: processState = ");
-     Serial.println(processState);
-
-     parseLine();   // Get the GPS Reading
+  // Check for a force restart
+  if (forceRestart) {
+       Serial.println("!!! Reset forced !!!");
+       processState = 999;
+       forceRestart = false;
+       delay(500);    // give the calling controller a few seconds to get started
+  }
+  
+  Serial.print("Main Loop: ");
      
-     switch (processState) {
+  parseLine();   // Get the GPS Reading
+     
+  switch (processState) {
        
-       // Initial state
-       case 999:
-         if (gpsStatus == 'A') {     // If we get a valid GPS reading
-             processState = 888;     // go to next process state
-         }
-         break;
+    // Initial state
+    case 999:
+       Serial.println(" Waiting for GPS Signal");
+       if (gpsStatus == 'A') {     // If we get a valid GPS reading
+           processState = 888;     // go to next process state
+       }
+       break;
          
-       // Waiting to calculate GPS systematic error  
-       case 888:
-         if (targetWaypointLatitude != 0.0) {  // If we have received the initial waypoint
-           getSystematicError();               // get a reading for the start point
-           processState = 555;                 // and go to next process state
-         }
-         break;
+    // Waiting to calculate GPS systematic error  
+    case 888:
+      Serial.println("Waiting for initial waypoint");
+      if (targetWaypointLatitude != 0.0) {  // If we have received the initial waypoint
+         getSystematicError();               // get a reading for the start point
+         processState = 555;                 // and go to next process state
+      }
+      break;
        
-       // Processing waypoints
-       case 777:
-         if (targetWaypointLatitude != 0.0) { // If we have a target waypoint
-           if (gpsStatus == 'A') {            // and we have a valid GPS reading
-             calculatePosition();             // calculate a distance and angle to target
-           } else {
-             processState = 666;              // Invalid GPS - go to 666 state
-           }
-         } else {                             // No waypoint provided
-           processState = 555;                // wait for waypoint
-         }
-         break;
+    // Processing waypoints
+    case 777:
+      Serial.println("Processing waypoint");
+      if (targetWaypointLatitude != 0.0) { // If we have a target waypoint
+        if (gpsStatus == 'A') {            // and we have a valid GPS reading
+          calculatePosition();             // calculate a distance and angle to target
+        } else {
+          processState = 666;              // Invalid GPS - go to 666 state
+        }
+      } else {                             // No waypoint provided
+        processState = 555;                // wait for waypoint
+      }
+      break;
+      
+    // Invalid GPS reading state
+    case 666:
+      Serial.println("Invalid GPS Reading");
+      if (gpsStatus == 'A') {    // If we have a valid GPS reading
+        calculatePosition();     // calculate a distance and angle to target
+        processState = 777;      // and go back regular status
+      }
+      break;
+      
+    // Waiting for a waypoint
+    case 555:
+      Serial.print("Waiting for next waypoint");
+      if (targetWaypointLatitude != 0) {   // have we got a target now?
+        processState = 777;                // yes - go to normal status
+      }
+      break;
        
-       // Invalid GPS reading state
-       case 666:
-         if (gpsStatus == 'A') {    // If we have a valid GPS reading
-           calculatePosition();     // calculate a distance and angle to target
-           processState = 777;      // and go back regular status
-         }
-         break;
-         
-       // Waiting for a waypoint
-       case 555:
-         if (targetWaypointLatitude != 0) {   // have we got a target now?
-           processState = 777;                // yes - go to normal status
-         }
-         break;
-         
-       // Shouldn't get here!!!  
-       default:
-         Serial.print("ERROR: invalid processState: ");
-         Serial.print(processState, DEC);
-     }
+    // Shouldn't get here!!!  
+    default:
+      Serial.print("ERROR: invalid processState: ");
+      Serial.print(processState, DEC);
+  }
 }
 
 
@@ -601,9 +615,20 @@ void receiveEvent(int receivedByteCount) {
   uint8_t* ptr = (uint8_t *) &received_waypoint;
   char ch;
 
+  Serial.print("Receiving data: ");
   while (Wire.available()) {
     ch = Wire.receive();
     *ptr++ = ch;
+    Serial.print(ch, HEX);
+    Serial.print(" ");
+  }
+  Serial.println("");
+ 
+  if ((received_waypoint.latitude > 998.0) && (received_waypoint.longitude > 998.0)) { // Master forcing a restart
+    forceRestart = true;
+    processState = 999;  // force this, so that onRequest sends initial value between now and when forceRestart is
+                         // tested. 
+    return;
   }
   
   targetWaypointLatitude = received_waypoint.latitude;
@@ -613,7 +638,8 @@ void receiveEvent(int receivedByteCount) {
   Serial.print(targetWaypointLatitude, DEC);
   Serial.print(", longitude = ");
   Serial.println(targetWaypointLongitude, DEC);
-  
+
+    
 }
       
 
