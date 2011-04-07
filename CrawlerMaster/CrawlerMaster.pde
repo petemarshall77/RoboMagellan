@@ -73,7 +73,7 @@
 
 // Define steering values
 #define STRAIGHT      84
-#define LEFT         124
+#define LEFT         114
 #define RIGHT         54
 
 // Define MODES
@@ -156,25 +156,43 @@ void loop() {
     case GPS_MODE:
       Serial.println("GPS Mode");
       getNavigationData();
+      if (navigationAngle == 555) {
+        delay(1000);
+        break;
+      }
+      
       if (navigationAngle == 666) {  // Lost the GPS Signal...
         stopRobot();                 // Stop the robot, wait, then re-try
         delay(1000);
         break;
       }
-      if (navigationDistance < 3.0) {    
-         waypointNumber++;
-         if (waypointNumber >= NUMBER_OF_WAYPOINTS) {
-           stopRobot();
-           mode = COMPLETED_MODE;
-           break;
-         }
+      if (navigationDistance < 4.0) {    
          mode = CAMERA_MODE;
+         break;
       }
       driveRobot();
+      delay(250);
+      steerServo.write(STRAIGHT);
+      break;
+      
+    // Camera Mode
+    case CAMERA_MODE:
+      Serial.println("Camera Mode");
+      // hack - just move to next waypoint
+      waypointNumber++;
+      if (waypointNumber >= NUMBER_OF_WAYPOINTS) {
+        mode = COMPLETED_MODE;
+        break;
+      }
+      sendWaypoint(waypointNumber);
+      mode = GPS_MODE;
+      stopRobot();
+      delay(3000);  // Hack - give the navigation controller enough time to process next waypoint.
       break;
       
     // Completed mode - we're done, do nothing
     case COMPLETED_MODE:
+      stopRobot();
       Serial.println("Completed Mode");
       delay(5000);
       break;
@@ -184,6 +202,8 @@ void loop() {
       Serial.print("ERROR: invalid mode in loop - ");
       Serial.println(mode);
   }
+  printinfo();
+  
 }
 
 
@@ -283,6 +303,18 @@ void steer() {
 
 
 //********************************************************************************************************
+// Print diagnostic information
+//********************************************************************************************************
+void printinfo()
+{
+  Serial.print("Distance = ");
+  Serial.print(navigationDistance, DEC);
+  Serial.print("  Angle = ");
+  Serial.println(navigationAngle, DEC);
+}
+
+
+//********************************************************************************************************
 // Stop the robot
 //********************************************************************************************************
 void stopRobot()
@@ -296,5 +328,19 @@ void stopRobot()
 //********************************************************************************************************
 void driveRobot()
 {
-  // implement
+  Serial.print("Steer = ");
+  Serial.print(STRAIGHT - navigationAngle/4, DEC);
+  Serial.print("  ");
+  
+  steerServo.write(STRAIGHT - navigationAngle/4);
+  
+  if(navigationDistance < 6.0) {
+    Serial.println("Low Power");
+    pwrServo.write(LOW_POWER);
+  }
+  else {
+    Serial.println("Normal Power");
+    pwrServo.write(NORMAL_POWER);
+  }
+    
 }
