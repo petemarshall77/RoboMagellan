@@ -1,0 +1,160 @@
+' {$STAMP BS2}
+' {$PBASIC 2.5}
+
+' CMUcam1 Demo Program 2
+
+' Copyright 2006, Seattle Robotics
+
+' Basic Stamp 2
+
+RcvData VAR Byte(10)
+
+Confidence VAR Byte
+
+MiddleMassX VAR Byte
+
+DEBUG " Pause 1 second for CMUcam1 startup ", CR
+' Pause 1 second for CMUcam1 startup
+PAUSE 1000
+
+DEBUG " Send reset to sync ", CR
+' Send "reset" to sync CMUcam1 and Stamp
+ SEROUT 7, 84, ["RS", CR]
+PAUSE 1000
+
+DEBUG "Turn Greenled" , CR
+' Green LED on
+SEROUT 7, 84, ["L1 1",CR]
+PAUSE 100
+
+
+DEBUG " Auto adjust", CR
+' Turn on auto adjust for 5 seconds
+SEROUT 7, 84, ["CR 18 44",CR]
+PAUSE 100
+
+DEBUG " Pause 5 seconds for CMUcam1 to auto adjust to lighting conditions ", CR
+' Pause 5 seconds for CMUcam1 to auto adjust to lighting conditions
+PAUSE 5000
+
+
+'SEROUT 7, 84, ["CR 18 44 19 32",CR]
+'PAUSE 100
+
+DEBUG "Green LED auto mode " , CR
+' Green LED auto mode
+SEROUT 7, 84, ["L1 2",CR]
+PAUSE 100
+
+DEBUG " Give user time to place color target close in front of camera " , CR
+' Give user time to place color target close in front of camera
+PAUSE 5000
+
+DEBUG " send command - set pole mode " , CR
+' Send command - Set poll mode - only sends one return packet -
+' of data after each command - reduces data flow
+SEROUT 7, 84, ["PM 1",CR]
+PAUSE 100
+
+DEBUG " send command - set raw data mode " , CR
+' Send command - Set raw data mode - also suppress Ack:/Nak: to -
+' further reduce serial data
+SEROUT 7, 84, ["RM 3",CR]
+PAUSE 100
+
+DEBUG " track window command " , CR
+' Track Window command looks at the center of CMUcam1 image -
+' grabs the color information and sends to the Track Color function
+
+' Send command - Track window
+SEROUT 7, 84, ["TW",CR]
+
+' Display the S Statisics packet from TW command
+SERIN 9, 84, [STR RcvData\8]
+
+' Raw mode S packet data format:
+
+' 0 Byte always 255
+' 1 Byte always Character S
+' 2 Byte Red Mean
+' 3 Byte Green Mean
+' 4 Left Blue Mean
+' 5 Left Red Deviation
+' 6 Right Green Deviation
+' 7 Right Blue Deviation
+
+' Display all returned camera S Statistics packet data to PC debug screen
+
+DEBUG "Red Mean ",DEC RCVData(2) ,CR
+DEBUG "Green Mean ",DEC RCVData(3) ,CR
+DEBUG "Blue Mean ",DEC RCVData(4) ,CR
+DEBUG "Red Deviation ",DEC RCVData(5) ,CR
+DEBUG "Green Deviation ",DEC RCVData(6) ,CR
+DEBUG "Blue Deviation ",DEC RCVData(7) ,CR
+DEBUG " ", CR
+
+' Ignore the first M packet from TW
+PAUSE 2000
+
+Main:
+
+
+
+' Send command - Track color (with no arguments) -
+' will track last color grabbed by TW command
+SEROUT 7, 84, ["TC",CR]
+
+' Raw mode M packet data format:
+
+' 0 Byte always 255
+' 1 Byte always Character M
+' 2 Byte Middle Mass X
+' 3 Byte Middle Mass Y
+' 4 Left corner X
+' 5 Left corner Y
+' 6 Right corner X
+' 7 Right corner Y
+' 8 Byte is Pixels
+' 9 Byte is Confidence
+
+SERIN 9, 84, [STR RcvData\10]
+
+' Display all returned camera M Track Color packet data to PC debug screen
+
+'DEBUG "Middle Mass X ",DEC RCVData(2) ,CR
+'DEBUG "Middle Mass Y ",DEC RCVData(3) ,CR
+'DEBUG "Left Corner X ",DEC RCVData(4) ,CR
+'DEBUG "Left Corner Y ",DEC RCVData(5) ,CR
+'DEBUG "Right corner X ",DEC RCVData(6) ,CR
+'DEBUG "Right Corner Y ",DEC RCVData(7) ,CR
+'DEBUG "Pixels ",DEC RCVData(8) ,CR
+'DEBUG "Confidence ",DEC RCVData(9) ,CR
+'DEBUG " ", CR
+
+Confidence = RCVData(9)
+
+MiddleMassX = RCVData(2)
+
+IF (Confidence < 18) THEN
+  PULSOUT 12, 650
+  PULSOUT 13, 850
+  FREQOUT 10, 150, 2500 ' Beep
+
+ELSEIF (MiddleMassX < 40) THEN
+  PULSOUT 12, 850
+  PULSOUT 13, 850
+
+ELSEIF (MiddleMassX > 60) THEN
+  PULSOUT 12, 650
+  PULSOUT 13, 650
+
+ELSE
+  PULSOUT 12, 650
+  PULSOUT 13, 850
+
+
+ENDIF
+
+
+
+GOTO Main
