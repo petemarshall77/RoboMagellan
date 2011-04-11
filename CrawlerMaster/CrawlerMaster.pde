@@ -67,7 +67,7 @@
 // Define power values
 #define NO_POWER      95
 #define LOW_POWER    105
-#define NORMAL_POWER 110
+#define NORMAL_POWER 108
 #define MAX_POWER    150
 #define BACKWARD      85
 
@@ -80,21 +80,26 @@
 int mode;
 #define STARTUP_MODE          0
 #define GPS_MODE              1
-#define OBSTACLE_MOE          2
+#define OBSTACLE_MODE         2
 #define CAMERA_MODE           3
 #define SYSTEMATIC_ERROR_MODE 4
 #define COMPLETED_MODE        5
 
 // Define course waypoints;
-#define NUMBER_OF_WAYPOINTS 6
+#define NUMBER_OF_WAYPOINTS 7
 int waypointNumber = 0;
 
-double target_lats[NUMBER_OF_WAYPOINTS] = {33.778341, 33.778451, 33.778528, 33.778394, 33.778114, 33.778341};  
-double target_lons[NUMBER_OF_WAYPOINTS] = {118.418851, 118.419148, 118.418754, 118.419013, 118.418781, 118.418851};
+double target_lats[NUMBER_OF_WAYPOINTS] = {33.778341,33.778394, 33.778528, 33.778394, 33.778114,33.778528, 33.778341};  
+double target_lons[NUMBER_OF_WAYPOINTS] = {118.418851,118.419013, 118.418754, 118.419013, 118.418781,118.418754, 118.418851};
 
 // From Navigation Controller
 int navigationDistance;   // distance returned from Navigation controller
 int navigationAngle;      // angle returned from Navigation controller
+
+// From Sensor Controller
+int oldSensorDistance = 0;
+int sensorDistance = 0;       // ultrasonic/touch distance in cm.
+int sensorFlag = 0;
 
 // Hardware
 Servo steerServo, pwrServo;
@@ -144,7 +149,7 @@ void loop() {
     case SYSTEMATIC_ERROR_MODE:
       Serial.println("Waiting Systematic Error Mode");
       getNavigationData();             
-      if (navigationAngle == 555) {   // GPS has calculated systematic waypoint?
+      if (navigationAngle == 555) {
         waypointNumber = 1;           // yes - send the first waypoint
         sendWaypoint(waypointNumber); // ...and...
         mode = GPS_MODE;              // ...go into GPS mode
@@ -155,6 +160,19 @@ void loop() {
     // GPS Mode - navigate to next waypoint
     case GPS_MODE:
       Serial.println("GPS Mode");
+      getSensorData();
+      if (sensorDistance < 80  && sensorDistance != 0) {
+        sensorFlag++;
+        if(sensorFlag > 0) {
+          sensorFlag = 0;
+          stopRobot();
+          mode = OBSTACLE_MODE;
+          break;
+        }
+      }
+      else {
+        sensorFlag = 0;
+      }
       getNavigationData();
       if (navigationAngle == 555) {
         delay(1000);
@@ -189,6 +207,31 @@ void loop() {
       stopRobot();
       delay(3000);  // Hack - give the navigation controller enough time to process next waypoint.
       break;
+    
+    // Obstacle mode
+    case OBSTACLE_MODE:
+
+      {
+      Serial.println("Obstacle Mode");
+      int randnum = random(0,2);
+      if (randnum == 0) {
+        steerServo.write(RIGHT);
+      } else {
+        steerServo.write(LEFT);
+      }
+      pwrServo.write(BACKWARD);
+      randnum = random(750, 2000);
+      delay(randnum);
+      
+      steerServo.write(STRAIGHT);
+      //pwrServo.write(LOW_POWER);
+      //randnum = random(1000, 3000);
+      //delay(randnum);
+      
+      stopRobot();
+      mode = GPS_MODE;
+      break;
+      }  
       
     // Completed mode - we're done, do nothing
     case COMPLETED_MODE:
@@ -207,6 +250,20 @@ void loop() {
 }
 
 
+//********************************************************************************************************
+// Get sensor distance from Sensor controller
+//********************************************************************************************************
+void getSensorData()
+{
+  Wire.requestFrom(WIRE_ADDRESS_SENSORS, 1);
+  while (Wire.available()) {
+    int ch = Wire.receive();
+    oldSensorDistance = sensorDistance;
+    sensorDistance = ch;
+  }
+  Serial.print("Received distance from sensor controller = ");
+  Serial.println(sensorDistance, DEC);
+}
 //********************************************************************************************************
 // Get navigation data (distance and angle) from Navigation controller
 //********************************************************************************************************
@@ -310,7 +367,9 @@ void printinfo()
   Serial.print("Distance = ");
   Serial.print(navigationDistance, DEC);
   Serial.print("  Angle = ");
-  Serial.println(navigationAngle, DEC);
+  Serial.print(navigationAngle, DEC);
+  Serial.print("  Sensor = ");
+  Serial.println(sensorDistance, DEC);
 }
 
 
@@ -328,18 +387,19 @@ void stopRobot()
 //********************************************************************************************************
 void driveRobot()
 {
-  Serial.print("Steer = ");
-  Serial.print(STRAIGHT - navigationAngle/4, DEC);
+  Serial.print("Normal Steer = ");
+  Serial.print(STRAIGHT - navigationAngle/2, DEC);
   Serial.print("  ");
   
-  steerServo.write(STRAIGHT - navigationAngle/4);
   
   if(navigationDistance < 6.0) {
     Serial.println("Low Power");
+    steerServo.write(STRAIGHT - navigationAngle);
     pwrServo.write(LOW_POWER);
   }
   else {
     Serial.println("Normal Power");
+    steerServo.write(STRAIGHT - navigationAngle/2);
     pwrServo.write(NORMAL_POWER);
   }
     
