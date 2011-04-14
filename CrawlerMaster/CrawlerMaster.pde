@@ -103,7 +103,7 @@ int sensorFlag = 0;
 
 // Hardware
 Servo steerServo, pwrServo;
-
+#define failSafePin 5
 
 //********************************************************************************************************
 // SETUP - the action starts here!
@@ -114,6 +114,8 @@ void setup() {
   
   steerServo.attach(7);
   pwrServo.attach(6);
+  
+  pinMode(failSafePin, INPUT);
   
   Serial.begin(9600);
   Wire.begin();
@@ -128,11 +130,16 @@ void setup() {
 void loop() {
   
   Serial.print("Main Loop: ");
+
+  if (digitalRead(failSafePin) != HIGH) {
+   stopRobot();
+   Serial.println("*** FAILSAFE MODE ***");
+   delay(1000);
+   return;
+  }
   
   switch (mode) {
     
-     Serial.print("Main Loop: ");
-     
     // Startup mode - wait until we have a GPS reading
     case STARTUP_MODE:
       Serial.println("Startup Mode");
