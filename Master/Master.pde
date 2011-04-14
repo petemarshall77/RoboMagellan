@@ -62,8 +62,7 @@ void loop() {
   int cmu2 = digitalRead(2);
   
   if(!cmu1 && !cmu2) {
-    steerServo.write(LEFT);
-    pwrServo.write(BACKWARD);
+    mode = OBSTACLE_MODE;
   }
   else if(!cmu1 && cmu2) {
     steerServo.write(RIGHT);

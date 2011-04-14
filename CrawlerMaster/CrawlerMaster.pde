@@ -103,7 +103,7 @@ int sensorFlag = 0;
 
 // Hardware
 Servo steerServo, pwrServo;
-#define failSafePin 5
+#define failSafePin 2
 
 //********************************************************************************************************
 // SETUP - the action starts here!
@@ -117,11 +117,19 @@ void setup() {
   
   pinMode(failSafePin, INPUT);
   
+  //Interrupt attach on pin 2
+  attachInterrupt(0, deadSwitchReleased, LOW);
+  
   Serial.begin(9600);
   Wire.begin();
   delay(3000);
   
   forceNavigationRestart();  // force navigation controller to restart
+}
+
+void deadSwitchReleased() {
+  stopRobot();
+  Serial.println("*** FAILSAFE MODE ***");
 }
 
 //********************************************************************************************************
@@ -131,12 +139,15 @@ void loop() {
   
   Serial.print("Main Loop: ");
 
-  if (digitalRead(failSafePin) != HIGH) {
+/*
+  if (digitalRead(failSafePin) == LOW) {
    stopRobot();
    Serial.println("*** FAILSAFE MODE ***");
    delay(1000);
-   return;
   }
+  */
+  
+  //else { 
   
   switch (mode) {
     
@@ -253,7 +264,7 @@ void loop() {
       Serial.println(mode);
   }
   printinfo();
-  
+  //}
 }
 
 
